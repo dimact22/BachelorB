@@ -79,9 +79,11 @@ class TaskTime(BaseModel):
     pause_start: List[str]
     pause_end: List[str]
     id_task: str
+    group: str
     keyTime: str
     comment: Optional[str] # type: ignore
-
+    in_time: int
+    
 class TaskTimeCancel(BaseModel):
     cancel_time: str
     id_task: str

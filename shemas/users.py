@@ -87,6 +87,5 @@ class TaskTime(BaseModel):
 class TaskTimeCancel(BaseModel):
     cancel_time: str
     id_task: str
-    keyTime: str
     comment: str
 

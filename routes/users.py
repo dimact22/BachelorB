@@ -1,12 +1,13 @@
 from fastapi import APIRouter, HTTPException, status, Depends, Request, Body
-from db.dbconn import users_collections, groups, tasks, completedtasks  # Assuming this is your database collection or function
+from db.dbconn import users_collections, groups, tasks, completedtasks, fs  # Assuming this is your database collection or function
 from db.hash import Hash
 from jose import jwt
 from fastapi.encoders import jsonable_encoder
 import os
-from shemas.users import UserLogin, UserRegister, DeleteUserRequest, GroupCreateRequest, DeleteGroupRequest, UserEdit, GroupEdit, Task, TaskTime,TaskTimeCancel, TaskEdit
+from shemas.users import UserLogin, UserRegister, DeleteUserRequest, GroupCreateRequest, DeleteGroupRequest, UserEdit, GroupEdit, Task, TaskTime,TaskTimeCancel, TaskEdit, GroupCreateRequest2, GroupCreateRequest3
 from middelware.auth import auth_middleware_status_return, verify_admin_token, auth_middleware_phone_return
 from bson import ObjectId
+from io import BytesIO
 from datetime import datetime
 from datetime import datetime, timedelta
 import calendar
@@ -15,6 +16,10 @@ import io
 from openpyxl import Workbook
 from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
 from urllib.parse import unquote
+from fastapi import Form, File, UploadFile, Request, Depends
+from typing import List
+import json
+import gridfs
 
 user_app = APIRouter()  # Correct instantiation of APIRouter
 
@@ -51,6 +56,40 @@ async def register_user(request: Request, user: UserRegister):
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="There is some problem with the database")
     
     return {"status": "Ok"}
+@user_app.post("/tasks_by_group")
+async def get_tasks_by_group():
+    start_date = "10.04.2025"
+    end_date = "15.05.2025"
+    phone = "+380333444333444"
+
+    try:
+        start_dt = datetime.strptime(start_date, "%d.%m.%Y")
+        end_dt = datetime.strptime(end_date, "%d.%m.%Y")
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Неправильный формат даты")
+
+    query = {
+        "phone": phone,
+        "finish_time": {"$exists": True}
+    }
+
+    # УБРАТЬ await ЗДЕСЬ!
+    tasks_cursor = completedtasks.find(query)
+
+    result = {}
+
+    async for task in tasks_cursor:
+        try:
+            finish_time = datetime.strptime(task["finish_time"], "%d.%m.%Y, %H:%M:%S")
+        except Exception:
+            continue
+
+        if start_dt <= finish_time <= end_dt:
+            group = task.get("group", "Без групи")
+            task["_id"] = str(task["_id"])
+            result.setdefault(group, []).append(task)
+
+    return result
 
 @user_app.get("/get_users", dependencies=[Depends(verify_admin_token)])
 async def get_users(request: Request):
@@ -126,6 +165,67 @@ async def create_group(group: GroupCreateRequest):
     await groups.insert_one(group_data)
     return {"message": "Group successfully created"}
 
+
+@user_app.post("/get_users_info_group")
+async def get_users_info_group(
+    group: GroupCreateRequest2,
+    phone: str = Depends(auth_middleware_phone_return)
+):
+    group_data = await groups.find_one({"group_name": group.group_name})
+    if not group_data:
+        raise HTTPException(status_code=404, detail="Group not found")
+    if group_data["manager_phone"] != phone:
+        raise HTTPException(status_code=403, detail="You do not have permission to access this group")
+    user_phones = group_data.get("user_phones", [])
+    cursor = users_collections.find({"phone": {"$in": user_phones}}, {"password": 0, "_id": 0, "status": 0})
+    users = await cursor.to_list(length=None)  
+    return {"users": users}
+
+@user_app.post("/get_users_info_group2")
+async def get_users_info_group2(
+    groups_req: GroupCreateRequest3,
+    phone: str = Depends(auth_middleware_phone_return)
+):
+    result = {}
+
+    for group_name in groups_req.groups_names:
+        group_data = await groups.find_one({"group_name": group_name})
+        
+        if not group_data:
+            continue 
+        
+        if group_data["manager_phone"] != phone:
+            continue  
+
+        user_phones = group_data.get("user_phones", [])
+        
+        cursor = users_collections.find(
+            {"phone": {"$in": user_phones}},
+            {"password": 0, "_id": 0, "status": 0}
+        )
+        users = await cursor.to_list(length=None)
+        
+        result[group_name] = users
+    
+    return result
+@user_app.get("/download_file/{file_id}")
+async def download_file(file_id: str):
+    # Преобразуем file_id в ObjectId
+    try:
+        file_object_id = ObjectId(file_id)  # Преобразование строки в ObjectId
+    except Exception as e:
+        raise HTTPException(status_code=400, detail="Invalid file ID format")
+
+    # Поиск файла в GridFS по его ObjectId
+    try:
+        # Используем open_download_stream для асинхронного получения потока
+        file_stream = await fs.open_download_stream(file_object_id)
+    except gridfs.errors.NoFile:
+        raise HTTPException(status_code=404, detail="File not found")
+    
+    # Возвращаем файл пользователю как поток
+    return StreamingResponse(file_stream, media_type="image/jpeg", headers={"Content-Disposition": f"attachment; filename={file_stream.name}"})
+
 @user_app.get("/get_groups/", dependencies=[Depends(verify_admin_token)])
 async def get_groups(request: Request):
     cursor = groups.find({}, {
@@ -148,6 +248,8 @@ async def edit_user(request: Request, user: UserEdit):
         update_data["password"] = Hash.bcrypt(user.password)
     if user.status is not None: 
         update_data["status"] = user.status
+    if user.telegramName: 
+        update_data["telegramName"] = user.telegramName
 
     if not update_data:
         raise HTTPException(status_code=400, detail="No valid fields to update")
@@ -623,21 +725,80 @@ async def get_tasks(request: Request, phone=Depends(auth_middleware_phone_return
     return user_tasks
 
 @user_app.post("/push_task")
-async def push_task(request: Request, task: TaskTime, phone=Depends(auth_middleware_phone_return)):
+async def push_task(
+    start_time: str = Form(...),
+    finish_time: str = Form(...),
+    pause_start: str = Form(...),
+    pause_end: str = Form(...),
+    id_task: str = Form(...),
+    group: str = Form(...),
+    task_name: str = Form(...),
+    keyTime: str = Form(...),
+    comment: str = Form(None),
+    in_time: int = Form(...),
+    images: List[UploadFile] = File([]),
+    phone=Depends(auth_middleware_phone_return)
+):
+    # Преобразуем паузы в списки
+    pause_start_list = json.loads(pause_start)
+    pause_end_list = json.loads(pause_end)
+
+    # Конвертация строк в datetime
+    try:
+        dt_start = datetime.strptime(start_time, "%d.%m.%Y, %H:%M:%S")
+        dt_finish = datetime.strptime(finish_time, "%d.%m.%Y, %H:%M:%S")
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Неверный формат времени")
+
+    # Расчёт общего времени выполнения
+    total_minutes = (dt_finish - dt_start).total_seconds() / 60
+
+    # Расчёт времени всех пауз
+    total_pause_minutes = 0
+    for start_str, end_str in zip(pause_start_list, pause_end_list):
+        try:
+            ps = datetime.strptime(start_str, "%d.%m.%Y, %H:%M:%S")
+            pe = datetime.strptime(end_str, "%d.%m.%Y, %H:%M:%S")
+            total_pause_minutes += (pe - ps).total_seconds() / 60
+        except Exception:
+            continue
+
+    active_minutes = total_minutes - total_pause_minutes
+
+    # Загрузка фото в GridFS
+    photo_refs = []
+    for image in images:
+        content = await image.read()
+        file_id = await fs.upload_from_stream(image.filename, content)
+        photo_refs.append({
+            "file_id": str(file_id),
+            "filename": image.filename
+        })
+
+    # Подготовка данных задачи
     task_data = {
-        "start_time": task.start_time,
-        "finish_time": task.finish_time,
-        "pause_start": task.pause_start,
-        "pause_end": task.pause_end,
-        "id_task": task.id_task,
-        'group': task.group,
+        "start_time": start_time,
+        "finish_time": finish_time,
+        "pause_start": pause_start_list,
+        "pause_end": pause_end_list,
+        "id_task": id_task,
+        "group": group,
+        "keyTime": keyTime,
         "phone": phone,
-        "comment": task.comment,
-        'status': 1,
-        'in_time': task.in_time
+        "comment": comment,
+        "in_time": in_time,
+        "task_name": task_name,
+        "status": 1,
+        "photos": photo_refs,
+        "total_minutes": int(total_minutes),
+        "pause_minutes": int(total_pause_minutes),
+        "active_minutes": int(active_minutes)
     }
+
     await completedtasks.insert_one(task_data)
+
     return {"message": "Informations about task successfully saved to database"}
+        
 
 
 @user_app.post("/cancel_task")

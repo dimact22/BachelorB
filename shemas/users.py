@@ -15,12 +15,20 @@ class UserRegister(BaseModel):
     phone: str = Field(..., min_length=13)
     password: str = Field(..., min_length=6, max_length=20)
     status: str
+    telegramName: str
 
 class UserEdit(BaseModel):
     id: str
     name: str
     status: str
     password: str
+    telegramName: str
+
+class GroupCreateRequest2(BaseModel):
+    group_name: str
+
+class GroupCreateRequest3(BaseModel):
+    groups_names: List[str]
 
 class DeleteUserRequest(BaseModel):
     id: str

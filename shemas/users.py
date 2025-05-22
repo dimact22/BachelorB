@@ -79,6 +79,10 @@ class TaskEdit(BaseModel):
     needphoto: int
     needcomment: int
 
+class TaskRequest(BaseModel):
+    start_date: str
+    end_date: str
+    group: str
 
 
 class TaskTime(BaseModel):
@@ -95,5 +99,7 @@ class TaskTime(BaseModel):
 class TaskTimeCancel(BaseModel):
     cancel_time: str
     id_task: str
+    task_name: str
+    group: str
     comment: str
 

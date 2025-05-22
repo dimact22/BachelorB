@@ -4,7 +4,7 @@ from db.hash import Hash
 from jose import jwt
 from fastapi.encoders import jsonable_encoder
 import os
-from shemas.users import UserLogin, UserRegister, DeleteUserRequest, GroupCreateRequest, DeleteGroupRequest, UserEdit, GroupEdit, Task, TaskTime,TaskTimeCancel, TaskEdit, GroupCreateRequest2, GroupCreateRequest3
+from shemas.users import UserLogin, UserRegister, DeleteUserRequest, GroupCreateRequest, DeleteGroupRequest, UserEdit, GroupEdit, Task, TaskTime,TaskTimeCancel, TaskEdit, GroupCreateRequest2, GroupCreateRequest3, TaskRequest
 from middelware.auth import auth_middleware_status_return, verify_admin_token, auth_middleware_phone_return
 from bson import ObjectId
 from io import BytesIO
@@ -56,27 +56,39 @@ async def register_user(request: Request, user: UserRegister):
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="There is some problem with the database")
     
     return {"status": "Ok"}
-@user_app.post("/tasks_by_group")
-async def get_tasks_by_group():
-    start_date = "10.04.2025"
-    end_date = "15.05.2025"
-    phone = "+380333444333444"
 
+@user_app.get("/task/{task_id}")
+async def get_task(task_id: str):
     try:
-        start_dt = datetime.strptime(start_date, "%d.%m.%Y")
-        end_dt = datetime.strptime(end_date, "%d.%m.%Y")
+        obj_id = ObjectId(task_id)
+    except Exception:
+        raise HTTPException(status_code=400, detail="Невірний ID")
+
+    task = await tasks.find_one({"_id": obj_id})
+    if not task:
+        raise HTTPException(status_code=404, detail="Завдання не знайдено")
+
+    task["_id"] = str(task["_id"])
+    return task
+    
+@user_app.post("/tasks_by_group")
+async def get_tasks_by_group(start_date: str, end_date: str, phone=Depends(auth_middleware_phone_return)):
+    try:
+        start_dt = datetime.strptime(start_date, "%Y-%m-%d")
+        end_dt = datetime.strptime(end_date, "%Y-%m-%d") + timedelta(days=1) - timedelta(seconds=1)
     except ValueError:
-        raise HTTPException(status_code=400, detail="Неправильный формат даты")
+        raise HTTPException(status_code=400, detail="Неправильний формат дати")
 
     query = {
         "phone": phone,
         "finish_time": {"$exists": True}
     }
 
-    # УБРАТЬ await ЗДЕСЬ!
     tasks_cursor = completedtasks.find(query)
 
     result = {}
+
+    grouped_tasks = {}
 
     async for task in tasks_cursor:
         try:
@@ -87,9 +99,62 @@ async def get_tasks_by_group():
         if start_dt <= finish_time <= end_dt:
             group = task.get("group", "Без групи")
             task["_id"] = str(task["_id"])
-            result.setdefault(group, []).append(task)
+            task["__parsed_finish_time"] = finish_time  # временное поле для сортировки
+            grouped_tasks.setdefault(group, []).append(task)
 
+    # Сортировка внутри каждой группы по времени завершения (от нового к старому)
+    for group, tasks in grouped_tasks.items():
+        sorted_tasks = sorted(tasks, key=lambda x: x["__parsed_finish_time"], reverse=True)
+        for t in sorted_tasks:
+            del t["__parsed_finish_time"]  # удалим временное поле
+            total_active_minutes = sum(t.get("active_minutes", 0) or 0 for t in sorted_tasks)
+
+        result[group] = [total_active_minutes] + sorted_tasks
+    print(result)
     return result
+
+@user_app.post("/tasks_by_group2")
+async def get_tasks_by_group(request: TaskRequest, phone=Depends(auth_middleware_phone_return)):
+    try:
+        phone_group = await groups.find_one({"group_name": request.group}, {"manager_phone": 1})
+        if phone_group["manager_phone"] != phone:
+            raise HTTPException(status_code=403, detail="У вас немає прав для виконання цієї задачі")
+    except Exception:
+        raise HTTPException(status_code=404, detail="Група не знайдена")
+    try:
+        start_dt = datetime.strptime(request.start_date, "%Y-%m-%d")
+        end_dt = datetime.strptime(request.end_date, "%Y-%m-%d") + timedelta(days=1) - timedelta(seconds=1)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Неправильний формат дати")
+
+    query = {
+        "group": request.group,
+        "finish_time": {"$exists": True}
+    }
+
+    tasks_cursor = completedtasks.find(query)
+
+    result = []
+    total_active_minutes = 0  # <- добавляем переменную для суммы
+
+    async for task in tasks_cursor:
+        try:
+            finish_time = datetime.strptime(task["finish_time"], "%d.%m.%Y, %H:%M:%S")
+        except Exception:
+            continue
+
+        if start_dt <= finish_time <= end_dt:
+            task["_id"] = str(task["_id"])
+            
+            # Добавляем проверку и суммирование active_minutes
+            active_minutes = task.get("active_minutes")
+            if isinstance(active_minutes, (int, float)):
+                total_active_minutes += active_minutes
+
+            result.append(task)
+    result2 = [total_active_minutes] + result
+    print(result2)
+    return result2
 
 @user_app.get("/get_users", dependencies=[Depends(verify_admin_token)])
 async def get_users(request: Request):
@@ -140,6 +205,7 @@ async def get_users_add(request: Request):
         {"status": {"$nin": ["admin", "receive"]}},
         {"name": 1, "phone": 1, "_id": 0}
     )
+    
     return [user async for user in cursor]
 
 @user_app.get("/get_users_receive", dependencies=[Depends(verify_admin_token)])
@@ -148,6 +214,7 @@ async def get_users_receive(request: Request):
         {"status": {"$nin": ["admin", "add"]}},
         {"name": 1, "phone": 1, "_id": 0}
     )
+    
     return [user async for user in cursor]
 
 @user_app.post("/create_group/", dependencies=[Depends(verify_admin_token)])
@@ -224,7 +291,7 @@ async def download_file(file_id: str):
         raise HTTPException(status_code=404, detail="File not found")
     
     # Возвращаем файл пользователю как поток
-    return StreamingResponse(file_stream, media_type="image/jpeg", headers={"Content-Disposition": f"attachment; filename={file_stream.name}"})
+    return StreamingResponse(file_stream, media_type="image/jpeg", headers={"Content-Disposition": f"attachment;"})
 
 @user_app.get("/get_groups/", dependencies=[Depends(verify_admin_token)])
 async def get_groups(request: Request):
@@ -804,12 +871,15 @@ async def push_task(
 @user_app.post("/cancel_task")
 async def cancel_task(request: Request, task_cancel: TaskTimeCancel, phone=Depends(auth_middleware_phone_return)):
     task_data = {
-        "cancel_time": task_cancel.cancel_time,
+        "finish_time": task_cancel.cancel_time,
         "id_task": task_cancel.id_task,
         "phone": phone,
         "comment": task_cancel.comment,
+        "group": task_cancel.group,
+        "task_name": task_cancel.task_name,
         'status': 0
     }
+    print(task_data)
     await completedtasks.insert_one(task_data)
     return {"message": "Informations about task successfully saved to database"}
 

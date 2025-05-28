@@ -9,7 +9,7 @@ MONGO_URL = os.getenv("MONGO_URL")
 
 client = AsyncIOMotorClient(MONGO_URL)
 
-db = client.get_database("azubi_wohnen")
+db = client.get_database("MainDatabase")
 
 fs = motor_gridfs.AsyncIOMotorGridFSBucket(db)  
 

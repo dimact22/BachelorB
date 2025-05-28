@@ -1,12 +1,10 @@
 from fastapi import FastAPI
 from db.dbconn import users_collections
 from fastapi.middleware.cors import CORSMiddleware
-from routes.users import user_app as users  # Import the correct router object
+from routes.users import user_app as users  
 
-# Initialize FastAPI app
 app = FastAPI()
 
-# Add CORS middleware to handle cross-origin requests
 app.add_middleware(
     CORSMiddleware,
     allow_origins=['*'],
@@ -28,5 +26,4 @@ async def init_admin():
     else:
         print("ℹ️ Admin user already exists")
 
-# Include the `users` router
 app.include_router(users)

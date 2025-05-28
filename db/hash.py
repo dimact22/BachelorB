@@ -15,6 +15,6 @@ class Hash:
     def verify(plain_password: str, hashed_password: str) -> bool:
         return pwd_cxt.verify(plain_password, hashed_password)
 
-print(Hash.bcrypt("adminpass"))
+# print(Hash.bcrypt("adminpass"))
     
 

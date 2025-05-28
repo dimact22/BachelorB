@@ -1,14 +1,14 @@
 # Description
 
-This program implements the program in that people could track their tasks, employers could give tasks to their employees and monitor their performance, and also conduct an analysis of completed tasks and individual employees.
+This program implements the program in that people can track their tasks, employers can give tasks to their employees and monitor their implementation, as well as analyze completed tasks and individual employees.
 
 In the application, employers can create groups with employees and issue tasks to all of them, or employers can create a separate group with one employee and issue tasks to him.
 
-The program will have convenient filter functionality and a very informative analysis of completed tasks and individual users.
+The program has a convenient filter functionality and a very informative analysis of completed tasks and individual users.
 
-This program is implemented for small local stores that need certain functionality and for each chain of stores a separate approach will be shown.
+This program is implemented for small local stores that need a certain functionality and a separate approach will be shown for each chain of stores.
 
-At the moment, the application is under development, but is already being developed with potential buyers and taking into account their wishes.
+At the moment, the application is under development with potential buyers and taking into account their wishes.
 
 # Setting up Virtual Environment
 To set up a virtual environment for this application, follow these steps:
@@ -52,6 +52,39 @@ on macOS/Linux
 2. Access Swagger UI:
 
 Open your browser and navigate to http://localhost:8000/docs to access the Swagger UI documentation.
+
+## Docker Setup
+
+### Prerequisites
+- Docker installed ([Install Docker](https://docs.docker.com/get-docker/))
+- Docker Compose installed
+
+### 🚀 Build & Run
+1. Clone the repository:
+
+### `git clone https://github.com/your-repo/task-management-system.git`
+### `cd task-management-system`
+
+2. Start containers:
+
+### `docker-compose up --build`
+
+3. Restarting:
+
+### `docker-compose down`
+### `docker-compose up --build`
+
+4. Stopping:
+
+### `docker-compose down`
+
+5. Cleanup:
+
+### `docker-compose down -v`
+
+Access Points:
+MongoDB	            mongodb://localhost:27017
+Backend API Docs	http://localhost:8000/docs
 
 ## Tools and Technologies
 ### MongoDB

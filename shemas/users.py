@@ -222,6 +222,7 @@ class Task(BaseModel):
     importance: int
     needphoto: int
     needcomment: int
+    openquestion: Optional[bool] = False
 
     
 class TaskEdit(BaseModel):
@@ -276,7 +277,19 @@ class TaskEdit(BaseModel):
     taskid: str
     needphoto: int
     needcomment: int
-
+    openquestion: Optional[bool] = False
+    
+class QuestionTaskRequest(BaseModel):
+    taskId: str
+    taskTitle: str
+    comment: str
+    createdBy: str
+    createdName: str
+    
+class ChatReadRequest(BaseModel):
+    task_id: str
+    other_user_phone: str
+        
 class TaskRequest(BaseModel):
     """
     Schema for task retrieval request by group.

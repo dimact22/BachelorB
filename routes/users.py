@@ -1,10 +1,12 @@
-from fastapi import APIRouter, HTTPException, status, Depends, Request, Body
-from db.dbconn import users_collections, groups, tasks, completedtasks, fs  
+
+from fastapi import APIRouter, HTTPException, status, Depends, Request, Body, WebSocket, WebSocketDisconnect
+from db.dbconn import users_collections, groups, tasks, completedtasks, fs, comments, chat_read_state, telegram_users
 from db.hash import Hash
+from typing import Dict
 from jose import jwt
 from fastapi.encoders import jsonable_encoder
 import os
-from shemas.users import UserLogin, UserRegister, DeleteUserRequest, GroupCreateRequest, DeleteGroupRequest, UserEdit, GroupEdit, Task, TaskTime,TaskTimeCancel, TaskEdit, GroupCreateRequest2, GroupCreateRequest3, TaskRequest
+from shemas.users import UserLogin, UserRegister, DeleteUserRequest, GroupCreateRequest, DeleteGroupRequest, UserEdit, GroupEdit, Task, TaskTime,TaskTimeCancel, TaskEdit, GroupCreateRequest2, GroupCreateRequest3, TaskRequest, QuestionTaskRequest, ChatReadRequest
 from middelware.auth import auth_middleware_status_return, verify_admin_token, auth_middleware_phone_return
 from bson import ObjectId
 from io import BytesIO
@@ -22,6 +24,7 @@ from fastapi import Form, File, UploadFile, Request, Depends
 from typing import List
 import json
 import gridfs
+from telegramfiles.startpage import bot
 
 user_app = APIRouter()  
 
@@ -54,7 +57,7 @@ async def login_user(user: UserLogin):
     try:
         found_user = await users_collections.find_one({"phone": user.phone})
         if not found_user:
-            raise HTTPException(
+            return HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail="User not found"
             )
@@ -73,13 +76,8 @@ async def login_user(user: UserLogin):
             algorithm='HS256'
         )
         return {"token": token}
-        
-    except jwt.PyJWTError:
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="Token generation failed"
-        )
     except Exception as e:
+        print(e)
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="Internal server error"
@@ -1419,6 +1417,7 @@ async def create_task(request: Request, task: Task, phone=Depends(auth_middlewar
                     "created_by": phone,
                     'needphoto': task.needphoto,
                     'needcomment': task.needcomment,
+                    'openquestion': task.openquestion,
                     "created_name": user_info['name']
                 }
                 await tasks.insert_one(task_data)
@@ -1693,6 +1692,7 @@ async def get_info_procent_about_task(request: Request, group: str, task_id: str
     
 @user_app.delete("/delete_task/{task_id}")
 async def delete_task(request: Request, task_id: str, phone=Depends(auth_middleware_phone_return)):
+    
     """
     Deletes a task created by the authenticated user.
     
@@ -1725,6 +1725,313 @@ async def delete_task(request: Request, task_id: str, phone=Depends(auth_middlew
     except Exception as e:
         raise HTTPException(status_code=500, detail="Невідома помилка сервера")
 
+@user_app.post("/question-task")
+async def question_task(
+    data: QuestionTaskRequest,
+    phone=Depends(auth_middleware_phone_return)
+):
+    message_doc = {
+        "task_id": data.taskId,
+        "task_title": data.taskTitle,
+        "text": data.comment,
+        "created_at": datetime.utcnow(),
+        "author": {
+            "phone": phone,
+            "role": "client"
+        },
+        "receiver": {
+            "phone": data.createdBy,
+            "name": data.createdName
+        },
+        "type": "question"
+    }
+
+    await comments.insert_one(message_doc)
+
+    return {
+        "status": "ok",
+        "message": "Дані отримано",
+        "taskId": data.taskId
+    }
+
+@user_app.get("/chats")
+async def get_chats(phone: str = Depends(auth_middleware_phone_return)):
+    pipeline = [
+        {"$match": {"$or": [{"author.phone": phone}, {"receiver.phone": phone}]}},
+        {"$group": {
+            "_id": "$task_id",
+            "task_id": {"$first": "$task_id"},
+            "task_title": {"$first": "$task_title"},
+            "author": {"$first": "$author"},
+            "receiver": {"$first": "$receiver"}
+        }},
+        {"$sort": {"task_id": -1}}
+    ]
+    chats_raw = await comments.aggregate(pipeline).to_list(length=None)
+
+    chats = []
+    for chat in chats_raw:
+        other_user_phone = (
+            chat["receiver"]["phone"]
+            if chat["author"]["phone"] == phone
+            else chat["author"]["phone"]
+        )
+        
+        other_user = await users_collections.find_one(
+            {"phone": other_user_phone},
+            {"password": 0}  
+        )
+        
+        if other_user:
+            other_user["_id"] = str(other_user["_id"])  
+
+        chats.append({
+            "task_id": chat["task_id"],
+            "task_title": chat["task_title"],
+            "other_user": other_user
+        })
+
+    return {"status": "ok", "chats": chats}
+
+
+@user_app.get("/messages/{task_id}/{other_phone}")
+async def get_chat_messages(task_id: str, other_phone: str, my_phone: str = Depends(auth_middleware_phone_return)):
+    cursor = comments.find({
+        "task_id": task_id,
+        "$or": [
+            {"author.phone": my_phone, "receiver.phone": other_phone},
+            {"author.phone": other_phone, "receiver.phone": my_phone}
+        ]
+    }).sort("created_at", 1)
+
+    messages = []
+    async for msg in cursor:
+        msg["_id"] = str(msg["_id"])
+        messages.append(msg)
+
+    return {"status": "ok", "messages": messages}
+
+connections: Dict[str, Dict[str, WebSocket]] = {}
+
+@user_app.websocket("/ws/chat/{task_id}/{phones_pair}")
+async def chat_ws(websocket: WebSocket, task_id: str, phones_pair: str):
+    # Декодируем URL
+    phones_pair = unquote(phones_pair)
+
+    token = websocket.query_params.get("token")
+    if not token:
+        await websocket.close(code=1008)
+        return
+
+    try:
+        payload = jwt.decode(token, "test", algorithms=["HS256"])
+        my_phone = payload.get("sub")
+    except:
+        await websocket.close(code=1008)
+        return
+
+    await websocket.accept()
+
+    # Используем ровно тот chat_id, который прислали с фронта
+    chat_id = f"{task_id}_{phones_pair}"
+
+    if chat_id not in connections:
+        connections[chat_id] = {}
+    connections[chat_id][my_phone] = websocket
+    print(f"[CONNECT] chat_id={chat_id}, phones={list(connections[chat_id].keys())}")
+
+    try:
+        while True:
+            data = await websocket.receive_json()
+
+            message_doc = {
+                "task_id": task_id,
+                "task_title": data["task_title"],
+                "text": data["text"],
+                "created_at": datetime.utcnow(),
+                "author": {"phone": my_phone, "role": "client"},
+                "receiver": data["receiver"],
+                "type": "question"
+            }
+
+            await comments.insert_one(message_doc)
+            outgoing_message = dict(message_doc)
+            outgoing_message["created_at"] = message_doc["created_at"].isoformat()
+
+            if "_id" in outgoing_message:
+                outgoing_message["_id"] = str(outgoing_message["_id"])
+
+            # Рассылаем всем подключенным по chat_id
+            for phone, ws in connections[chat_id].items():
+                try:
+                    await ws.send_json(outgoing_message)
+                    print(f"[SENT] to {phone}: {outgoing_message['text']}")
+                except Exception as e:
+                    print(f"[ERROR] sending to {phone}: {e}")
+            print(f"[BROADCAST] chat_id={chat_id}, phones={list(connections[chat_id].keys())}")
+            receiver_phone = data["receiver"]["phone"]
+            ws_global = global_connections.get(receiver_phone)
+
+            if ws_global:
+                await ws_global.send_json({
+                    "type": "new_message",
+                    "task_id": task_id,
+                    "from_phone": my_phone,
+                    "created_at": outgoing_message["created_at"]
+                })
+            receiver_in_chat = (
+                chat_id in connections and
+                receiver_phone in connections[chat_id]
+            )
+
+            if receiver_in_chat:
+                print("❌ Пользователь в чате — Telegram не отправляем")
+            else:
+                print("✅ Пользователь НЕ в чате — отправляем в Telegram")
+                user = await users_collections.find_one({"phone": receiver_phone})
+                if not user:
+                    print("Пользователь с таким телефоном не найден")
+                else:
+                    username = user.get("telegramName") 
+                    print(f"Найден пользователь: {username}") 
+
+                    telegram_user = await telegram_users.find_one({"username": username}) 
+                    if not telegram_user:
+                        print("Chat_id для Telegram не найден")
+                    else:
+                        chat_id_tg = telegram_user.get("chat_id")
+                        print(f"Chat_id Telegram: {chat_id_tg}")
+
+                try:
+                    await bot.send_message(
+                        chat_id=chat_id_tg,
+                        text=f"Нове повідомлення по таску '{data['task_title']}' від {my_phone}:\n{data['text']}"
+                    )
+                except Exception as e:
+                    print(f"TG error: {e}")
+
+    except WebSocketDisconnect:
+        if chat_id in connections and my_phone in connections[chat_id]:
+            del connections[chat_id][my_phone]
+            if not connections[chat_id]:
+                del connections[chat_id]
+
+global_connections: Dict[str, WebSocket] = {}
+
+@user_app.websocket("/ws/notifications")
+async def notifications_ws(websocket: WebSocket):
+    token = websocket.query_params.get("token")
+    if not token:
+        await websocket.close(code=1008)
+        return
+
+    try:
+        payload = jwt.decode(token, "test", algorithms=["HS256"])
+        my_phone = payload.get("sub")
+    except:
+        await websocket.close(code=1008)
+        return
+
+    await websocket.accept()
+    global_connections[my_phone] = websocket
+    print(f"[GLOBAL CONNECT] phone={my_phone}")
+
+    try:
+        while True:
+            await websocket.receive_text()
+    except WebSocketDisconnect:
+        global_connections.pop(my_phone, None)
+        print(f"[GLOBAL DISCONNECT] phone={my_phone}")
+            
+@user_app.post("/chats/read")
+async def mark_chat_read(
+    body: ChatReadRequest,
+    my_phone: str = Depends(auth_middleware_phone_return)
+):
+    await chat_read_state.update_one(
+        {
+            "user_phone": my_phone,
+            "task_id": body.task_id,
+            "other_user_phone": body.other_user_phone
+        },
+        {
+            "$set": {
+                "last_read_at": datetime.utcnow()
+            }
+        },
+        upsert=True
+    )
+
+    return {"status": "ok"}
+
+@user_app.get("/chats/unread")
+async def get_unread_chats(
+    phone: str = Depends(auth_middleware_phone_return)
+):
+    pipeline = [
+    {
+        "$match": {"receiver.phone": phone}
+    },
+    {
+        "$lookup": {
+            "from": "ChatReadState",
+            "let": {"task_id": "$task_id", "author_phone": "$author.phone"},
+            "pipeline": [
+                {
+                    "$match": {
+                        "$expr": {
+                            "$and": [
+                                {"$eq": ["$user_phone", phone]},
+                                {"$eq": ["$task_id", "$$task_id"]},
+                                {"$eq": ["$other_user_phone", "$$author_phone"]}
+                            ]
+                        }
+                    }
+                }
+            ],
+            "as": "read_state"
+        }
+    },
+    {
+        "$unwind": {
+            "path": "$read_state",
+            "preserveNullAndEmptyArrays": True  
+        }
+    },
+    {
+        "$group": {
+            "_id": {"task_id": "$task_id", "from_phone": "$author.phone"},
+            "last_message_at": {"$max": "$created_at"},
+            "last_read_at": {"$max": "$read_state.last_read_at"} 
+        }
+    },
+    {
+        "$project": {
+            "task_id": "$_id.task_id",
+            "from_phone": "$_id.from_phone",
+            "last_message_at": 1,
+            "last_read_at": 1,
+            "is_unread": {
+                "$cond": [
+                    {"$or": [{"$eq": ["$last_read_at", None]}, {"$gt": ["$last_message_at", "$last_read_at"]}]},
+                    True,
+                    False
+                ]
+            }
+        }
+    }
+]
+
+    unread = await comments.aggregate(pipeline).to_list(None)
+
+    return {
+        "status": "ok",
+        "debug": unread, 
+        "unread": [
+            f"{u['task_id']}_{u['from_phone']}" for u in unread if u["is_unread"]
+        ]
+    }
+    
 @user_app.put("/update_task/")
 async def update_task(request: Request, task: TaskEdit, phone=Depends(auth_middleware_phone_return)):
     """
@@ -1774,7 +2081,8 @@ async def update_task(request: Request, task: TaskEdit, phone=Depends(auth_middl
         "task_type": task.task_type,
         "importance": task.importance,
         'needcomment': task.needcomment,
-        'needphoto': task.needphoto
+        'needphoto': task.needphoto,
+        'openquestion': task.openquestion,
     }
     try:
         result = await tasks.update_one(
@@ -1788,3 +2096,24 @@ async def update_task(request: Request, task: TaskEdit, phone=Depends(auth_middl
             raise HTTPException(status_code=404, detail="Failed to update task")
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to update task: {str(e)}")
+
+@user_app.get("/tasks/{task_id}")
+async def get_task_by_id(
+    task_id: str,
+    phone=Depends(auth_middleware_phone_return)
+):
+    if not ObjectId.is_valid(task_id):
+        raise HTTPException(status_code=400, detail="Invalid task id")
+
+    task = await tasks.find_one(
+        {"_id": ObjectId(task_id)},
+        {"_id": 0}
+    )
+
+    if not task:
+        raise HTTPException(status_code=404, detail="Task not found")
+
+    return {
+        "status": "ok",
+        "task": task
+    }

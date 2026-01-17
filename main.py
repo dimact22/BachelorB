@@ -1,7 +1,11 @@
-from fastapi import FastAPI
-from db.dbconn import users_collections
+from fastapi import FastAPI, Request
+from db.dbconn import users_collections, create_indexes
 from fastapi.middleware.cors import CORSMiddleware
 from routes.users import user_app as users  
+from telegramfiles.startpage import application
+import os
+from telegram import Update
+import datetime
 
 app = FastAPI()
 
@@ -15,6 +19,7 @@ app.add_middleware(
 
 @app.on_event("startup")
 async def init_admin():
+    create_indexes()
     admin = await users_collections.find_one({"phone": "+380111111111"})
     if not admin:
         await users_collections.insert_one({
@@ -25,5 +30,17 @@ async def init_admin():
         print("✅ Admin user created")
     else:
         print("ℹ️ Admin user already exists")
+    
+    await application.initialize()
+    await application.bot.set_webhook(
+        url=f"{os.getenv('WEBHOOK_URL')}/telegram/webhook"
+    )
+
+@app.post("/telegram/webhook")
+async def telegram_webhook(request: Request):
+    data = await request.json()
+    update = Update.de_json(data, application.bot)
+    await application.process_update(update)
+    return {"ok": True}
 
 app.include_router(users)

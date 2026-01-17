@@ -19,4 +19,8 @@ docs_build
 venv
 docs.zip
 archive.zip
+# MongoDB
+mongo-data/
+*.wt
+*.log
 

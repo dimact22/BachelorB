@@ -1824,7 +1824,7 @@ async def chat_ws(websocket: WebSocket, task_id: str, phones_pair: str):
         return
 
     try:
-        payload = jwt.decode(token, "test", algorithms=["HS256"])
+        payload = jwt.decode(token, os.getenv("SecretJwt"), algorithms=["HS256"])
         my_phone = payload.get("sub")
     except:
         await websocket.close(code=1008)
@@ -1926,7 +1926,7 @@ async def notifications_ws(websocket: WebSocket):
         return
 
     try:
-        payload = jwt.decode(token, "test", algorithms=["HS256"])
+        payload = jwt.decode(token, os.getenv("SecretJwt"), algorithms=["HS256"])
         my_phone = payload.get("sub")
     except:
         await websocket.close(code=1008)
